@@ -2903,6 +2903,78 @@ function parseDockerComposeFile(Service|Application $resource, bool $isNew = fal
     }
 }
 
+function substituteEnvironmentVariables(string $text, $allEnvironments = []): string
+{
+    // Handle environment variable substitution with fallback syntax: ${VAR:-default} and ${VAR-default}
+    $pattern = '/\$\{([^}]+)\}/';
+
+    return preg_replace_callback($pattern, function ($matches) use ($allEnvironments) {
+        $varExpression = $matches[1];
+
+        // Check if it contains fallback syntax (:- or -)
+        if (strpos($varExpression, ':-') !== false) {
+            // ${VAR:-default} - use fallback if variable is unset or empty
+            [$varName, $fallbackValue] = explode(':-', $varExpression, 2);
+
+            // Check if environment variable exists in allEnvironments collection
+            if (is_array($allEnvironments) && isset($allEnvironments[$varName])) {
+                $value = $allEnvironments[$varName];
+                return ($value !== '' && $value !== null) ? $value : $fallbackValue;
+            } elseif (is_object($allEnvironments) && method_exists($allEnvironments, 'has') && $allEnvironments->has($varName)) {
+                $value = $allEnvironments->get($varName);
+                return ($value !== '' && $value !== null) ? $value : $fallbackValue;
+            }
+
+            // Check system environment variables
+            $envValue = getenv($varName);
+            if ($envValue !== false && $envValue !== '') {
+                return $envValue;
+            }
+
+            // Use fallback value
+            return $fallbackValue;
+        } elseif (strpos($varExpression, '-') !== false && strpos($varExpression, ':-') === false) {
+            // ${VAR-default} - use fallback only if variable is unset (not if empty)
+            [$varName, $fallbackValue] = explode('-', $varExpression, 2);
+
+            // Check if environment variable exists in allEnvironments collection
+            if (is_array($allEnvironments) && array_key_exists($varName, $allEnvironments)) {
+                return (string) $allEnvironments[$varName];
+            } elseif (is_object($allEnvironments) && method_exists($allEnvironments, 'has') && $allEnvironments->has($varName)) {
+                return (string) $allEnvironments->get($varName);
+            }
+
+            // Check system environment variables
+            $envValue = getenv($varName);
+            if ($envValue !== false) {
+                return $envValue;
+            }
+
+            // Use fallback value
+            return $fallbackValue;
+        } else {
+            // Simple variable reference without fallback
+            $varName = $varExpression;
+
+            // Check if environment variable exists in allEnvironments collection
+            if (is_array($allEnvironments) && isset($allEnvironments[$varName])) {
+                return $allEnvironments[$varName];
+            } elseif (is_object($allEnvironments) && method_exists($allEnvironments, 'has') && $allEnvironments->has($varName)) {
+                return $allEnvironments->get($varName);
+            }
+
+            // Check system environment variables
+            $envValue = getenv($varName);
+            if ($envValue !== false && $envValue !== '') {
+                return $envValue;
+            }
+
+            // Return original if not found
+            return $matches[0];
+        }
+    }, $text);
+}
+
 function newParser(Application|Service $resource, int $pull_request_id = 0, ?int $preview_id = null): Collection
 {
     $isApplication = $resource instanceof Application;
@@ -3294,6 +3366,8 @@ function newParser(Application|Service $resource, int $pull_request_id = 0, ?int
                 $content = null;
                 $isDirectory = false;
                 if (is_string($volume)) {
+                    // Apply environment variable substitution before extracting source and target
+                    $volume = substituteEnvironmentVariables($volume, $allEnvironments);
                     $source = str($volume)->before(':');
                     $target = str($volume)->after(':')->beforeLast(':');
                     $foundConfig = $fileStorages->whereMountPath($target)->first();
@@ -3316,6 +3390,9 @@ function newParser(Application|Service $resource, int $pull_request_id = 0, ?int
                     $type = data_get_str($volume, 'type');
                     $source = data_get_str($volume, 'source');
                     $target = data_get_str($volume, 'target');
+                    if ($source) {
+                        $source = str(substituteEnvironmentVariables($source->value(), $allEnvironments));
+                    }
                     $content = data_get($volume, 'content');
                     $isDirectory = (bool) data_get($volume, 'isDirectory', null) || (bool) data_get($volume, 'is_directory', null);
 
@@ -3397,6 +3474,7 @@ function newParser(Application|Service $resource, int $pull_request_id = 0, ?int
                         $name = "{$name}-pr-$pullRequestId";
                     }
                     if (is_string($volume)) {
+                        $volume = substituteEnvironmentVariables($volume, $allEnvironments);
                         $source = str($volume)->before(':');
                         $target = str($volume)->after(':')->beforeLast(':');
                         $source = $name;
